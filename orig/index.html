@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Cyber-Thor's Honey Heist</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; touch-action: none; }
+canvas { display: block; max-width: 100vw; max-height: 100vh; object-fit: contain; }
+#dpad { display: none; position: fixed; bottom: 20px; left: 20px; z-index: 10; }
+#dpad button {
+  position: absolute; width: 60px; height: 60px; border: 2px solid rgba(255,255,255,0.4);
+  background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.6); font-size: 28px;
+  border-radius: 12px; outline: none; -webkit-tap-highlight-color: transparent; user-select: none;
+}
+#dpad button:active { background: rgba(255,255,255,0.3); }
+#dpad .dp-up    { left: 65px; top: 0; }
+#dpad .dp-down  { left: 65px; top: 130px; }
+#dpad .dp-left  { left: 0;    top: 65px; }
+#dpad .dp-right { left: 130px; top: 65px; }
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="600"></canvas>
+<div id="dpad">
+  <button class="dp-up" data-dir="ArrowUp">&uarr;</button>
+  <button class="dp-down" data-dir="ArrowDown">&darr;</button>
+  <button class="dp-left" data-dir="ArrowLeft">&larr;</button>
+  <button class="dp-right" data-dir="ArrowRight">&rarr;</button>
+</div>
+<script>
+// === CONSTANTS ===
+const W = 800;
+const H = 600;
+const PLAYER_SIZE = 30;
+const PLAYER_BASE_SPEED = 250; // pixels per second
+const MAX_DT = 1 / 30;
+
+// Items
+const POLLEN_RADIUS = 8;
+const POLLEN_MAX_ON_SCREEN = 5;
+const POLLEN_SPAWN_MIN = 2.0; // seconds
+const POLLEN_SPAWN_MAX = 3.0;
+const POLLEN_TO_HONEY = 10;
+const HONEY_POINTS = 100;
+const TOKEN_SIZE = 14;
+const TOKEN_CHANCE = 0.12;      // chance a spawn is a gold token
+const BLUE_TOKEN_CHANCE = 0.05; // chance a spawn is a blue token
+const TOKEN_SPEED_BONUS = 0.10; // +10% per gold token
+
+// Enemies
+const QUEEN_BEE_W = 20;
+const QUEEN_BEE_H = 14;
+const QUEEN_BEE_SPEED = 220;
+const LOKI_W = 36;
+const LOKI_H = 28;
+const LOKI_SPEED = 100;
+const LOKI_TRACK_STRENGTH = 0.4;
+const ENEMY_SPAWN_BASE = 2.0;
+const ENEMY_SPAWN_MIN = 0.6;
+const INVINCIBLE_DURATION = 1.5;
+
+// Wildcard Events
+const LIGHTNING_MIN = 15;
+const LIGHTNING_MAX = 20;
+const LIGHTNING_STUN_DURATION = 1.5;
+const LIGHTNING_FLASH_DURATION = 0.15;
+const GOD_CLOUD_INTERVAL = 30;
+const GOD_CLOUD_DISPLAY_DURATION = 3;
+const RAGE_DURATION = 5;
+
+// Screen shake
+const SHAKE_DURATION = 0.3;
+const SHAKE_INTENSITY = 6;
+
+// HUD
+const HUD_HEIGHT = 40;
+const POLLEN_BAR_W = 150;
+const POLLEN_BAR_H = 16;
+
+// High score
+let highScore = parseInt(localStorage.getItem('honeyHeistHighScore')) || 0;
+
+// === CANVAS SETUP ===
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// === INPUT ===
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key] = true; });
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+// === STATE ===
+function resetState() {
+  return {
+    player: {
+      x: W / 2 - PLAYER_SIZE / 2,
+      y: H / 2 - PLAYER_SIZE / 2,
+      w: PLAYER_SIZE,
+      h: PLAYER_SIZE,
+      baseSpeed: PLAYER_BASE_SPEED,
+      tokenMultiplier: 1,
+      stunned: false,
+    },
+    score: 0,
+    lives: 3,
+    pollen: 0,
+    honey: 0,
+    items: [],
+    enemies: [],
+    // Timers (delta-time accumulators)
+    itemSpawnTimer: 0,
+    enemySpawnTimer: 0,
+    lightningTimer: LIGHTNING_MIN + Math.random() * (LIGHTNING_MAX - LIGHTNING_MIN),
+    godCloudTimer: GOD_CLOUD_INTERVAL,
+    // Flags
+    stunTimer: 0,
+    invincibleTimer: 0,
+    rageTimer: 0,
+    rageActive: false,
+    godCloudActive: false,
+    godCloudDisplayTimer: 0,
+    lightningFlash: false,
+    lightningFlashTimer: 0,
+    shakeTimer: 0,
+    gameOver: false,
+    titleScreen: true,
+    // Difficulty
+    enemySpawnInterval: 2.0,
+    gameTime: 0,
+  };
+}
+
+let state = resetState();
+let lastTime = 0;
+
+// === HELPERS ===
+function aabb(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x &&
+         a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function speed(player) {
+  return player.baseSpeed * player.tokenMultiplier * (player.stunned ? 0 : 1);
+}
+
+// === SPAWNING ===
+function spawnItem() {
+  const roll = Math.random();
+  if (roll < BLUE_TOKEN_CHANCE) {
+    return { type: 'blue_token', x: Math.random() * (W - TOKEN_SIZE), y: Math.random() * (H - HUD_HEIGHT - TOKEN_SIZE) + HUD_HEIGHT, w: TOKEN_SIZE, h: TOKEN_SIZE };
+  } else if (roll < BLUE_TOKEN_CHANCE + TOKEN_CHANCE) {
+    return { type: 'gold_token', x: Math.random() * (W - TOKEN_SIZE), y: Math.random() * (H - HUD_HEIGHT - TOKEN_SIZE) + HUD_HEIGHT, w: TOKEN_SIZE, h: TOKEN_SIZE };
+  } else {
+    return { type: 'pollen', x: Math.random() * (W - POLLEN_RADIUS * 2) + POLLEN_RADIUS, y: Math.random() * (H - HUD_HEIGHT - POLLEN_RADIUS * 2) + HUD_HEIGHT + POLLEN_RADIUS, w: POLLEN_RADIUS * 2, h: POLLEN_RADIUS * 2 };
+  }
+}
+
+function spawnEnemy() {
+  const isQueen = Math.random() < 0.6;
+  const side = Math.floor(Math.random() * 4); // 0=top,1=right,2=bottom,3=left
+  let x, y, vx, vy;
+  if (isQueen) {
+    const ew = QUEEN_BEE_W, eh = QUEEN_BEE_H;
+    const spd = QUEEN_BEE_SPEED;
+    if (side === 0) { x = Math.random() * W; y = -eh; vx = (Math.random() - 0.5) * spd; vy = spd * (0.5 + Math.random() * 0.5); }
+    else if (side === 1) { x = W; y = Math.random() * H; vx = -spd * (0.5 + Math.random() * 0.5); vy = (Math.random() - 0.5) * spd; }
+    else if (side === 2) { x = Math.random() * W; y = H; vx = (Math.random() - 0.5) * spd; vy = -spd * (0.5 + Math.random() * 0.5); }
+    else { x = -ew; y = Math.random() * H; vx = spd * (0.5 + Math.random() * 0.5); vy = (Math.random() - 0.5) * spd; }
+    return { type: 'queen', x, y, w: ew, h: eh, vx, vy };
+  } else {
+    const ew = LOKI_W, eh = LOKI_H;
+    const spd = LOKI_SPEED;
+    if (side === 0) { x = Math.random() * W; y = -eh; vx = (Math.random() - 0.5) * spd * 0.5; vy = spd; }
+    else if (side === 1) { x = W; y = Math.random() * H; vx = -spd; vy = (Math.random() - 0.5) * spd * 0.5; }
+    else if (side === 2) { x = Math.random() * W; y = H; vx = (Math.random() - 0.5) * spd * 0.5; vy = -spd; }
+    else { x = -ew; y = Math.random() * H; vx = spd; vy = (Math.random() - 0.5) * spd * 0.5; }
+    return { type: 'loki', x, y, w: ew, h: eh, vx, vy };
+  }
+}
+
+// === UPDATE ===
+function update(dt) {
+  if (state.gameOver || state.titleScreen) return;
+
+  const s = state;
+  const p = s.player;
+  const spd = speed(p);
+
+  s.gameTime += dt;
+
+  // --- Stun timer ---
+  if (p.stunned) {
+    s.stunTimer -= dt;
+    if (s.stunTimer <= 0) {
+      p.stunned = false;
+      s.stunTimer = 0;
+    }
+  }
+
+  // --- Invincibility timer ---
+  if (s.invincibleTimer > 0) {
+    s.invincibleTimer -= dt;
+  }
+
+  // --- Screen shake timer ---
+  if (s.shakeTimer > 0) {
+    s.shakeTimer -= dt;
+  }
+
+  // --- Rage timer ---
+  if (s.rageActive) {
+    s.rageTimer -= dt;
+    if (s.rageTimer <= 0) {
+      s.rageActive = false;
+      s.rageTimer = 0;
+      p.w = PLAYER_SIZE;
+      p.h = PLAYER_SIZE;
+    }
+  }
+
+  // --- Lightning Zap ---
+  s.lightningTimer -= dt;
+  if (s.lightningTimer <= 0) {
+    p.stunned = true;
+    s.stunTimer = LIGHTNING_STUN_DURATION;
+    s.lightningFlash = true;
+    s.lightningFlashTimer = LIGHTNING_FLASH_DURATION;
+    s.lightningTimer = LIGHTNING_MIN + Math.random() * (LIGHTNING_MAX - LIGHTNING_MIN);
+  }
+  if (s.lightningFlash) {
+    s.lightningFlashTimer -= dt;
+    if (s.lightningFlashTimer <= 0) {
+      s.lightningFlash = false;
+    }
+  }
+
+  // --- God Cloud ---
+  s.godCloudTimer -= dt;
+  if (s.godCloudTimer <= 0) {
+    s.godCloudActive = true;
+    s.godCloudDisplayTimer = GOD_CLOUD_DISPLAY_DURATION;
+    s.godCloudTimer = GOD_CLOUD_INTERVAL;
+  }
+  if (s.godCloudActive) {
+    s.godCloudDisplayTimer -= dt;
+    if (s.godCloudDisplayTimer <= 0) {
+      s.godCloudActive = false;
+    }
+  }
+
+  // Player movement (speed is 0 when stunned via speed() helper)
+  if (keys['ArrowUp'] || keys['w'] || keys['W']) p.y -= spd * dt;
+  if (keys['ArrowDown'] || keys['s'] || keys['S']) p.y += spd * dt;
+  if (keys['ArrowLeft'] || keys['a'] || keys['A']) p.x -= spd * dt;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) p.x += spd * dt;
+
+  // Boundary clamping
+  p.x = Math.max(0, Math.min(W - p.w, p.x));
+  p.y = Math.max(0, Math.min(H - p.h, p.y));
+
+  // --- Item spawning ---
+  s.itemSpawnTimer += dt;
+  const spawnInterval = POLLEN_SPAWN_MIN + Math.random() * (POLLEN_SPAWN_MAX - POLLEN_SPAWN_MIN);
+  if (s.itemSpawnTimer >= spawnInterval && s.items.length < POLLEN_MAX_ON_SCREEN) {
+    s.items.push(spawnItem());
+    s.itemSpawnTimer = 0;
+  }
+
+  // --- Item collision ---
+  for (let i = s.items.length - 1; i >= 0; i--) {
+    const item = s.items[i];
+    // For pollen (circle), use center-based AABB
+    const itemBox = item.type === 'pollen'
+      ? { x: item.x - POLLEN_RADIUS, y: item.y - POLLEN_RADIUS, w: POLLEN_RADIUS * 2, h: POLLEN_RADIUS * 2 }
+      : item;
+    if (aabb(p, itemBox)) {
+      if (item.type === 'pollen') {
+        s.pollen++;
+        if (s.pollen >= POLLEN_TO_HONEY) {
+          s.pollen = 0;
+          s.honey++;
+          s.score += HONEY_POINTS;
+        }
+      } else if (item.type === 'gold_token') {
+        p.tokenMultiplier += TOKEN_SPEED_BONUS;
+      } else if (item.type === 'blue_token') {
+        // Activate rage mode
+        s.rageActive = true;
+        s.rageTimer = RAGE_DURATION;
+        p.w = PLAYER_SIZE * 2;
+        p.h = PLAYER_SIZE * 2;
+      }
+      s.items.splice(i, 1);
+    }
+  }
+
+  // --- Enemy spawning ---
+  s.enemySpawnTimer += dt;
+  const currentSpawnInterval = Math.max(ENEMY_SPAWN_MIN, ENEMY_SPAWN_BASE - s.gameTime * 0.02);
+  if (s.enemySpawnTimer >= currentSpawnInterval) {
+    s.enemies.push(spawnEnemy());
+    s.enemySpawnTimer = 0;
+  }
+
+  // --- Enemy update ---
+  for (let i = s.enemies.length - 1; i >= 0; i--) {
+    const e = s.enemies[i];
+    // Loki tracks player slightly
+    if (e.type === 'loki') {
+      const dx = (p.x + p.w / 2) - (e.x + e.w / 2);
+      const dy = (p.y + p.h / 2) - (e.y + e.h / 2);
+      e.vx += dx * LOKI_TRACK_STRENGTH * dt;
+      e.vy += dy * LOKI_TRACK_STRENGTH * dt;
+      // Clamp loki speed
+      const lspd = Math.sqrt(e.vx * e.vx + e.vy * e.vy);
+      if (lspd > LOKI_SPEED * 1.5) {
+        e.vx = (e.vx / lspd) * LOKI_SPEED * 1.5;
+        e.vy = (e.vy / lspd) * LOKI_SPEED * 1.5;
+      }
+    }
+    e.x += e.vx * dt;
+    e.y += e.vy * dt;
+
+    // Remove if off-screen (with margin)
+    if (e.x < -100 || e.x > W + 100 || e.y < -100 || e.y > H + 100) {
+      s.enemies.splice(i, 1);
+      continue;
+    }
+
+    // Collision with player
+    if (aabb(p, e)) {
+      if (s.rageActive) {
+        // Destroy enemy for bonus
+        s.score += 50;
+        s.enemies.splice(i, 1);
+      } else if (s.invincibleTimer <= 0) {
+        s.lives--;
+        s.invincibleTimer = INVINCIBLE_DURATION;
+        s.shakeTimer = SHAKE_DURATION;
+        if (s.lives <= 0) {
+          s.gameOver = true;
+          if (s.score > highScore) {
+            highScore = s.score;
+            localStorage.setItem('honeyHeistHighScore', highScore);
+          }
+        }
+      }
+    }
+  }
+}
+
+// === DRAW ===
+function draw() {
+  // Clear
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, W, H);
+
+  if (state.titleScreen) {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state.gameOver) {
+    drawGameOver();
+    return;
+  }
+
+  const s = state;
+  const p = s.player;
+
+  // Screen shake
+  if (s.shakeTimer > 0) {
+    const sx = (Math.random() - 0.5) * SHAKE_INTENSITY * 2;
+    const sy = (Math.random() - 0.5) * SHAKE_INTENSITY * 2;
+    ctx.save();
+    ctx.translate(sx, sy);
+  }
+
+  // --- Draw items ---
+  for (const item of s.items) {
+    if (item.type === 'pollen') {
+      ctx.fillStyle = '#ffdd00';
+      ctx.beginPath();
+      ctx.arc(item.x, item.y, POLLEN_RADIUS, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (item.type === 'gold_token') {
+      ctx.fillStyle = '#ffaa00';
+      ctx.fillRect(item.x, item.y, item.w, item.h);
+      // Diamond accent
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(item.x + 4, item.y + 4, 6, 6);
+    } else if (item.type === 'blue_token') {
+      ctx.fillStyle = '#00ccff';
+      ctx.fillRect(item.x, item.y, item.w, item.h);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(item.x + 4, item.y + 4, 6, 6);
+    }
+  }
+
+  // --- Draw enemies ---
+  for (const e of s.enemies) {
+    if (e.type === 'queen') {
+      ctx.fillStyle = '#ff3333';
+      ctx.fillRect(e.x, e.y, e.w, e.h);
+    } else {
+      ctx.fillStyle = '#9933ff';
+      ctx.fillRect(e.x, e.y, e.w, e.h);
+    }
+  }
+
+  // --- Draw player ---
+  // Flash when invincible
+  if (s.invincibleTimer > 0 && Math.floor(s.invincibleTimer * 10) % 2 === 0) {
+    // Skip drawing on even frames for flash effect
+  } else {
+    ctx.fillStyle = s.rageActive ? '#ff2200' : '#4488ff';
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+  }
+
+  // --- Lightning flash overlay ---
+  if (s.lightningFlash) {
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // --- God Cloud text ---
+  if (s.godCloudActive) {
+    ctx.save();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 22px monospace';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = '#00ccff';
+    ctx.shadowBlur = 15;
+    ctx.fillText('YOU ARE THE BEE!', W / 2, 80);
+    ctx.fillText('GET OUT OF MY BUSINESS!', W / 2, 110);
+    ctx.restore();
+  }
+
+  // --- Stun indicator ---
+  if (s.player.stunned) {
+    ctx.fillStyle = 'rgba(255,255,0,0.3)';
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('STUNNED!', W / 2, H / 2 - 40);
+    ctx.textAlign = 'left';
+  }
+
+  // End screen shake
+  if (s.shakeTimer > 0) {
+    ctx.restore();
+  }
+
+  // --- Draw HUD ---
+  drawHUD();
+}
+
+function drawHUD() {
+  const s = state;
+  // HUD background
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, W, HUD_HEIGHT);
+
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'left';
+
+  // Score
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Score: ' + s.score, 10, 26);
+
+  // Lives
+  ctx.fillStyle = '#ff4444';
+  for (let i = 0; i < s.lives; i++) {
+    ctx.fillRect(130 + i * 22, 14, 16, 16);
+  }
+
+  // Honey count
+  ctx.fillStyle = '#ffaa00';
+  ctx.fillText('Honey: ' + s.honey, 210, 26);
+
+  // Pollen bar
+  const barX = 340;
+  const barY = 14;
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX, barY, POLLEN_BAR_W, POLLEN_BAR_H);
+  const fillW = (s.pollen / POLLEN_TO_HONEY) * POLLEN_BAR_W;
+  ctx.fillStyle = '#ffdd00';
+  ctx.fillRect(barX, barY, fillW, POLLEN_BAR_H);
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Pollen ' + s.pollen + '/' + POLLEN_TO_HONEY, barX + POLLEN_BAR_W + 8, 26);
+
+  // Rage indicator
+  if (s.rageActive) {
+    ctx.fillStyle = '#ff2200';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('RAGE! ' + Math.ceil(s.rageTimer) + 's', 620, 26);
+  }
+}
+
+function drawTitleScreen() {
+  // Subtitle
+  ctx.fillStyle = '#9933ff';
+  ctx.font = '16px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('~ A BLOCKY THOR ADVENTURE ~', W / 2, H / 2 - 100);
+
+  // Title
+  ctx.fillStyle = '#4488ff';
+  ctx.font = 'bold 48px monospace';
+  ctx.fillText("CYBER-THOR'S", W / 2, H / 2 - 50);
+  ctx.fillText('HONEY HEIST', W / 2, H / 2 + 10);
+
+  // Controls
+  ctx.fillStyle = '#888';
+  ctx.font = '14px monospace';
+  ctx.fillText('WASD / Arrow Keys to move', W / 2, H / 2 + 50);
+  ctx.fillText('Collect pollen, dodge enemies, survive!', W / 2, H / 2 + 72);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#ffaa00';
+    ctx.font = '16px monospace';
+    ctx.fillText('High Score: ' + highScore, W / 2, H / 2 + 105);
+  }
+
+  // Start prompt
+  ctx.fillStyle = '#ffcc00';
+  ctx.font = '20px monospace';
+  ctx.fillText('Press ENTER to start', W / 2, H / 2 + 140);
+  ctx.textAlign = 'left';
+}
+
+function drawGameOver() {
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 48px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('GAME OVER', W / 2, H / 2 - 40);
+  ctx.fillStyle = '#fff';
+  ctx.font = '24px monospace';
+  ctx.fillText('Score: ' + state.score, W / 2, H / 2 + 10);
+  ctx.fillStyle = '#ffaa00';
+  ctx.font = '16px monospace';
+  ctx.fillText('Honey collected: ' + state.honey, W / 2, H / 2 + 40);
+  if (state.score >= highScore && state.score > 0) {
+    ctx.fillStyle = '#00ff88';
+    ctx.font = 'bold 18px monospace';
+    ctx.fillText('NEW HIGH SCORE!', W / 2, H / 2 + 70);
+  } else {
+    ctx.fillStyle = '#888';
+    ctx.font = '16px monospace';
+    ctx.fillText('High Score: ' + highScore, W / 2, H / 2 + 70);
+  }
+  ctx.fillStyle = '#ffcc00';
+  ctx.font = '20px monospace';
+  ctx.fillText('Press ENTER to restart', W / 2, H / 2 + 110);
+  ctx.textAlign = 'left';
+}
+
+// === GAME LOOP ===
+function gameLoop(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, MAX_DT);
+  lastTime = timestamp;
+
+  // Title / Game Over input
+  if (state.titleScreen || state.gameOver) {
+    if (keys['Enter']) {
+      keys['Enter'] = false;
+      state = resetState();
+      state.titleScreen = false;
+    }
+  }
+
+  update(dt);
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(function(timestamp) {
+  lastTime = timestamp;
+  gameLoop(timestamp);
+});
+</script>
+</body>
+</html>

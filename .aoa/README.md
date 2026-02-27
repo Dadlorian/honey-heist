@@ -1,0 +1,31 @@
+# .aoa - aOa Project Link
+
+This folder links this project to your global aOa installation.
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `home.json` | Points to global aOa install location |
+| `whitelist.txt` | Optional: extra URLs/repos for this project |
+
+## What is aOa?
+
+aOa (Angle of Attack) provides fast O(1) code search for Claude Code.
+It replaces slow Grep/Glob operations with indexed symbol lookup.
+
+## Commands
+
+```bash
+aoa grep <term>      # O(1) symbol search
+aoa egrep <regex>    # Regex search (working set)
+aoa health           # Check services
+aoa remove           # Remove aOa from this project
+```
+
+See `.aoa/USAGE.md` for all commands, `.aoa/VALUE.md` for result anatomy.
+
+## Global Settings
+
+To change aOa settings (port, limits, paths),
+edit the .env file in your aOa installation directory.

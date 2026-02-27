@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Cyber-Thor's Honey Heist</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; touch-action: none; }
+canvas { display: block; }
+body.maximized canvas { width: 100vw; height: 100vh; object-fit: contain; }
+#joystick { display: none; position: fixed; bottom: 30px; right: 30px; z-index: 9999;
+  width: 140px; height: 140px; border-radius: 50%;
+  border: 3px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.08);
+  touch-action: none; }
+#joystick-knob { position: absolute; width: 56px; height: 56px; border-radius: 50%;
+  background: rgba(255,255,255,0.35); border: 2px solid rgba(255,255,255,0.5);
+  top: 42px; left: 42px; pointer-events: none; transition: none; }
+#game-container:fullscreen { width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; background: #000; }
+#game-container:fullscreen canvas { width: 100vw; height: 100vh; object-fit: contain; }
+#game-container:-webkit-full-screen { width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; background: #000; }
+#game-container:-webkit-full-screen canvas { width: 100vw; height: 100vh; object-fit: contain; }
+</style>
+</head>
+<body>
+<div id="game-container" style="position:relative; display:inline-block;">
+  <canvas id="game" width="800" height="600"></canvas>
+  <div id="joystick"><div id="joystick-knob"></div></div>
+</div>
+<script src="sprites.js?v=1771639030"></script>
+<script src="sounds.js?v=1771639030"></script>
+<script>
+// === CONSTANTS ===
+const W = 800;
+const H = 600;
+const PLAYER_SIZE = 30;
+const PLAYER_BASE_SPEED = 250; // pixels per second
+const MAX_DT = 1 / 30;
+
+// Items
+const POLLEN_RADIUS = 8;
+const POLLEN_MAX_ON_SCREEN = 5;
+const POLLEN_SPAWN_MIN = 2.0; // seconds
+const POLLEN_SPAWN_MAX = 3.0;
+const POLLEN_TO_HONEY = 10;
+const HONEY_POINTS = 100;
+const TOKEN_SIZE = 14;
+const TOKEN_CHANCE = 0.12;      // chance a spawn is a gold token
+const BLUE_TOKEN_CHANCE = 0.05; // chance a spawn is a blue token
+const TOKEN_SPEED_BONUS = 0.10; // +10% per gold token
+
+// Enemies
+const QUEEN_BEE_W = 20;
+const QUEEN_BEE_H = 14;
+const QUEEN_BEE_SPEED = 220;
+const LOKI_W = 36;
+const LOKI_H = 28;
+const LOKI_SPEED = 100;
+const LOKI_TRACK_STRENGTH = 0.4;
+const ENEMY_SPAWN_BASE = 2.0;
+const ENEMY_SPAWN_MIN = 0.6;
+const INVINCIBLE_DURATION = 1.5;
+
+// Wildcard Events
+const LIGHTNING_MIN = 15;
+const LIGHTNING_MAX = 20;
+const LIGHTNING_STUN_DURATION = 1.5;
+const LIGHTNING_FLASH_DURATION = 0.15;
+const GOD_CLOUD_INTERVAL = 30;
+const GOD_CLOUD_DISPLAY_DURATION = 3;
+const RAGE_DURATION = 5;
+
+// Screen shake
+const SHAKE_DURATION = 0.3;
+const SHAKE_INTENSITY = 6;
+
+// HUD
+const HUD_HEIGHT = 40;
+const POLLEN_BAR_W = 150;
+const POLLEN_BAR_H = 16;
+
+// High score
+let highScore = parseInt(localStorage.getItem('honeyHeistHighScore')) || 0;
+
+// === CANVAS SETUP ===
+const gameContainer = document.getElementById('game-container');
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// === INPUT ===
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (e.key === 'f' || e.key === 'F') {
+    document.body.classList.toggle('maximized');
+  }
+});
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+// === STATE ===
+function resetState() {
+  return {
+    player: {
+      x: W / 2 - PLAYER_SIZE / 2,
+      y: H / 2 - PLAYER_SIZE / 2,
+      w: PLAYER_SIZE,
+      h: PLAYER_SIZE,
+      baseSpeed: PLAYER_BASE_SPEED,
+      tokenMultiplier: 1,
+      stunned: false,
+    },
+    score: 0,
+    lives: 3,
+    pollen: 0,
+    honey: 0,
+    items: [],
+    enemies: [],
+    // Timers (delta-time accumulators)
+    itemSpawnTimer: 0,
+    enemySpawnTimer: 0,
+    lightningTimer: LIGHTNING_MIN + Math.random() * (LIGHTNING_MAX - LIGHTNING_MIN),
+    godCloudTimer: GOD_CLOUD_INTERVAL,
+    // Flags
+    stunTimer: 0,
+    invincibleTimer: 0,
+    rageTimer: 0,
+    rageActive: false,
+    godCloudActive: false,
+    godCloudDisplayTimer: 0,
+    lightningFlash: false,
+    lightningFlashTimer: 0,
+    shakeTimer: 0,
+    gameOver: false,
+    titleScreen: true,
+    // Difficulty
+    enemySpawnInterval: 2.0,
+    gameTime: 0,
+  };
+}
+
+let state = resetState();
+let lastTime = 0;
+
+// === HELPERS ===
+function aabb(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x &&
+         a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function speed(player) {
+  return player.baseSpeed * player.tokenMultiplier * (player.stunned ? 0 : 1);
+}
+
+// === SPAWNING ===
+function spawnItem() {
+  const roll = Math.random();
+  if (roll < BLUE_TOKEN_CHANCE) {
+    return { type: 'blue_token', x: Math.random() * (W - TOKEN_SIZE), y: Math.random() * (H - HUD_HEIGHT - TOKEN_SIZE) + HUD_HEIGHT, w: TOKEN_SIZE, h: TOKEN_SIZE };
+  } else if (roll < BLUE_TOKEN_CHANCE + TOKEN_CHANCE) {
+    return { type: 'gold_token', x: Math.random() * (W - TOKEN_SIZE), y: Math.random() * (H - HUD_HEIGHT - TOKEN_SIZE) + HUD_HEIGHT, w: TOKEN_SIZE, h: TOKEN_SIZE };
+  } else {
+    return { type: 'pollen', x: Math.random() * (W - POLLEN_RADIUS * 2) + POLLEN_RADIUS, y: Math.random() * (H - HUD_HEIGHT - POLLEN_RADIUS * 2) + HUD_HEIGHT + POLLEN_RADIUS, w: POLLEN_RADIUS * 2, h: POLLEN_RADIUS * 2 };
+  }
+}
+
+function spawnEnemy() {
+  const isQueen = Math.random() < 0.6;
+  const side = Math.floor(Math.random() * 4); // 0=top,1=right,2=bottom,3=left
+  let x, y, vx, vy;
+  if (isQueen) {
+    const ew = QUEEN_BEE_W, eh = QUEEN_BEE_H;
+    const spd = QUEEN_BEE_SPEED;
+    if (side === 0) { x = Math.random() * W; y = -eh; vx = (Math.random() - 0.5) * spd; vy = spd * (0.5 + Math.random() * 0.5); }
+    else if (side === 1) { x = W; y = Math.random() * H; vx = -spd * (0.5 + Math.random() * 0.5); vy = (Math.random() - 0.5) * spd; }
+    else if (side === 2) { x = Math.random() * W; y = H; vx = (Math.random() - 0.5) * spd; vy = -spd * (0.5 + Math.random() * 0.5); }
+    else { x = -ew; y = Math.random() * H; vx = spd * (0.5 + Math.random() * 0.5); vy = (Math.random() - 0.5) * spd; }
+    return { type: 'queen', x, y, w: ew, h: eh, vx, vy };
+  } else {
+    const ew = LOKI_W, eh = LOKI_H;
+    const spd = LOKI_SPEED;
+    if (side === 0) { x = Math.random() * W; y = -eh; vx = (Math.random() - 0.5) * spd * 0.5; vy = spd; }
+    else if (side === 1) { x = W; y = Math.random() * H; vx = -spd; vy = (Math.random() - 0.5) * spd * 0.5; }
+    else if (side === 2) { x = Math.random() * W; y = H; vx = (Math.random() - 0.5) * spd * 0.5; vy = -spd; }
+    else { x = -ew; y = Math.random() * H; vx = spd; vy = (Math.random() - 0.5) * spd * 0.5; }
+    return { type: 'loki', x, y, w: ew, h: eh, vx, vy };
+  }
+}
+
+// === UPDATE ===
+function update(dt) {
+  if (state.gameOver || state.titleScreen) return;
+
+  const s = state;
+  const p = s.player;
+  const spd = speed(p);
+
+  s.gameTime += dt;
+
+  // --- Stun timer ---
+  if (p.stunned) {
+    s.stunTimer -= dt;
+    if (s.stunTimer <= 0) {
+      p.stunned = false;
+      s.stunTimer = 0;
+    }
+  }
+
+  // --- Invincibility timer ---
+  if (s.invincibleTimer > 0) {
+    s.invincibleTimer -= dt;
+  }
+
+  // --- Screen shake timer ---
+  if (s.shakeTimer > 0) {
+    s.shakeTimer -= dt;
+  }
+
+  // --- Rage timer ---
+  if (s.rageActive) {
+    s.rageTimer -= dt;
+    if (s.rageTimer <= 0) {
+      s.rageActive = false;
+      s.rageTimer = 0;
+      p.w = PLAYER_SIZE;
+      p.h = PLAYER_SIZE;
+    }
+  }
+
+  // --- Lightning Zap ---
+  s.lightningTimer -= dt;
+  if (s.lightningTimer <= 0) {
+    p.stunned = true;
+    s.stunTimer = LIGHTNING_STUN_DURATION;
+    s.lightningFlash = true;
+    playSound('lightning_zap');
+    s.lightningFlashTimer = LIGHTNING_FLASH_DURATION;
+    s.lightningTimer = LIGHTNING_MIN + Math.random() * (LIGHTNING_MAX - LIGHTNING_MIN);
+  }
+  if (s.lightningFlash) {
+    s.lightningFlashTimer -= dt;
+    if (s.lightningFlashTimer <= 0) {
+      s.lightningFlash = false;
+    }
+  }
+
+  // --- God Cloud ---
+  s.godCloudTimer -= dt;
+  if (s.godCloudTimer <= 0) {
+    s.godCloudActive = true;
+    s.godCloudDisplayTimer = GOD_CLOUD_DISPLAY_DURATION;
+    s.godCloudTimer = GOD_CLOUD_INTERVAL;
+  }
+  if (s.godCloudActive) {
+    s.godCloudDisplayTimer -= dt;
+    if (s.godCloudDisplayTimer <= 0) {
+      s.godCloudActive = false;
+    }
+  }
+
+  // Player movement (speed is 0 when stunned via speed() helper)
+  if (keys['ArrowUp'] || keys['w'] || keys['W']) p.y -= spd * dt;
+  if (keys['ArrowDown'] || keys['s'] || keys['S']) p.y += spd * dt;
+  if (keys['ArrowLeft'] || keys['a'] || keys['A']) p.x -= spd * dt;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) p.x += spd * dt;
+
+  // Boundary clamping
+  p.x = Math.max(0, Math.min(W - p.w, p.x));
+  p.y = Math.max(0, Math.min(H - p.h, p.y));
+
+  // --- Item spawning ---
+  s.itemSpawnTimer += dt;
+  const spawnInterval = POLLEN_SPAWN_MIN + Math.random() * (POLLEN_SPAWN_MAX - POLLEN_SPAWN_MIN);
+  if (s.itemSpawnTimer >= spawnInterval && s.items.length < POLLEN_MAX_ON_SCREEN) {
+    s.items.push(spawnItem());
+    s.itemSpawnTimer = 0;
+  }
+
+  // --- Item collision ---
+  for (let i = s.items.length - 1; i >= 0; i--) {
+    const item = s.items[i];
+    // For pollen (circle), use center-based AABB
+    const itemBox = item.type === 'pollen'
+      ? { x: item.x - POLLEN_RADIUS, y: item.y - POLLEN_RADIUS, w: POLLEN_RADIUS * 2, h: POLLEN_RADIUS * 2 }
+      : item;
+    if (aabb(p, itemBox)) {
+      if (item.type === 'pollen') {
+        s.pollen++;
+        playSound('pollen_pickup');
+        if (s.pollen >= POLLEN_TO_HONEY) {
+          s.pollen = 0;
+          s.honey++;
+          s.score += HONEY_POINTS;
+        }
+      } else if (item.type === 'gold_token') {
+        p.tokenMultiplier += TOKEN_SPEED_BONUS;
+        playSound('token_pickup');
+      } else if (item.type === 'blue_token') {
+        // Activate rage mode
+        s.rageActive = true;
+        s.rageTimer = RAGE_DURATION;
+        playSound('rage_activation');
+        p.w = PLAYER_SIZE * 2;
+        p.h = PLAYER_SIZE * 2;
+      }
+      s.items.splice(i, 1);
+    }
+  }
+
+  // --- Enemy spawning ---
+  s.enemySpawnTimer += dt;
+  const currentSpawnInterval = Math.max(ENEMY_SPAWN_MIN, ENEMY_SPAWN_BASE - s.gameTime * 0.02);
+  if (s.enemySpawnTimer >= currentSpawnInterval) {
+    s.enemies.push(spawnEnemy());
+    s.enemySpawnTimer = 0;
+  }
+
+  // --- Enemy update ---
+  for (let i = s.enemies.length - 1; i >= 0; i--) {
+    const e = s.enemies[i];
+    // Loki tracks player slightly
+    if (e.type === 'loki') {
+      const dx = (p.x + p.w / 2) - (e.x + e.w / 2);
+      const dy = (p.y + p.h / 2) - (e.y + e.h / 2);
+      e.vx += dx * LOKI_TRACK_STRENGTH * dt;
+      e.vy += dy * LOKI_TRACK_STRENGTH * dt;
+      // Clamp loki speed
+      const lspd = Math.sqrt(e.vx * e.vx + e.vy * e.vy);
+      if (lspd > LOKI_SPEED * 1.5) {
+        e.vx = (e.vx / lspd) * LOKI_SPEED * 1.5;
+        e.vy = (e.vy / lspd) * LOKI_SPEED * 1.5;
+      }
+    }
+    e.x += e.vx * dt;
+    e.y += e.vy * dt;
+
+    // Remove if off-screen (with margin)
+    if (e.x < -100 || e.x > W + 100 || e.y < -100 || e.y > H + 100) {
+      s.enemies.splice(i, 1);
+      continue;
+    }
+
+    // Collision with player
+    if (aabb(p, e)) {
+      if (s.rageActive) {
+        // Destroy enemy for bonus
+        s.score += 50;
+        s.enemies.splice(i, 1);
+      } else if (s.invincibleTimer <= 0) {
+        s.lives--;
+        s.invincibleTimer = INVINCIBLE_DURATION;
+        s.shakeTimer = SHAKE_DURATION;
+        playSound('enemy_hit');
+        if (s.lives <= 0) {
+          s.gameOver = true;
+          playSound('game_over');
+          if (s.score > highScore) {
+            highScore = s.score;
+            localStorage.setItem('honeyHeistHighScore', highScore);
+          }
+        }
+      }
+    }
+  }
+}
+
+// === DRAW ===
+function draw() {
+  // Clear
+  if (spriteReady('background')) {
+    ctx.drawImage(SPRITE.background, 0, 0, W, H);
+  } else {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  if (state.titleScreen) {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state.gameOver) {
+    drawGameOver();
+    return;
+  }
+
+  const s = state;
+  const p = s.player;
+
+  // Screen shake
+  if (s.shakeTimer > 0) {
+    const sx = (Math.random() - 0.5) * SHAKE_INTENSITY * 2;
+    const sy = (Math.random() - 0.5) * SHAKE_INTENSITY * 2;
+    ctx.save();
+    ctx.translate(sx, sy);
+  }
+
+  // --- Draw items ---
+  for (const item of s.items) {
+    if (item.type === 'pollen') {
+      if (spriteReady('pollen')) {
+        ctx.drawImage(SPRITE.pollen, item.x - POLLEN_RADIUS, item.y - POLLEN_RADIUS, POLLEN_RADIUS * 2, POLLEN_RADIUS * 2);
+      } else {
+        ctx.fillStyle = '#ffdd00';
+        ctx.beginPath();
+        ctx.arc(item.x, item.y, POLLEN_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (item.type === 'gold_token') {
+      if (spriteReady('gold_token')) {
+        ctx.drawImage(SPRITE.gold_token, item.x, item.y, item.w, item.h);
+      } else {
+        ctx.fillStyle = '#ffaa00';
+        ctx.fillRect(item.x, item.y, item.w, item.h);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(item.x + 4, item.y + 4, 6, 6);
+      }
+    } else if (item.type === 'blue_token') {
+      if (spriteReady('blue_token')) {
+        ctx.drawImage(SPRITE.blue_token, item.x, item.y, item.w, item.h);
+      } else {
+        ctx.fillStyle = '#00ccff';
+        ctx.fillRect(item.x, item.y, item.w, item.h);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(item.x + 4, item.y + 4, 6, 6);
+      }
+    }
+  }
+
+  // --- Draw enemies ---
+  for (const e of s.enemies) {
+    if (e.type === 'queen') {
+      if (spriteReady('queen_bee')) {
+        ctx.drawImage(SPRITE.queen_bee, e.x, e.y, e.w, e.h);
+      } else {
+        ctx.fillStyle = '#ff3333';
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+      }
+    } else {
+      if (spriteReady('loki_doom')) {
+        ctx.drawImage(SPRITE.loki_doom, e.x, e.y, e.w, e.h);
+      } else {
+        ctx.fillStyle = '#9933ff';
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+      }
+    }
+  }
+
+  // --- Draw player ---
+  // Flash when invincible
+  if (s.invincibleTimer > 0 && Math.floor(s.invincibleTimer * 10) % 2 === 0) {
+    // Skip drawing on even frames for flash effect
+  } else {
+    if (spriteReady('player')) {
+      ctx.drawImage(SPRITE.player, p.x, p.y, p.w, p.h);
+      if (s.rageActive) {
+        ctx.fillStyle = 'rgba(255,0,0,0.4)';
+        ctx.fillRect(p.x, p.y, p.w, p.h);
+      }
+    } else {
+      ctx.fillStyle = s.rageActive ? '#ff2200' : '#4488ff';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+    }
+  }
+
+  // --- Lightning flash overlay ---
+  if (s.lightningFlash) {
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // --- God Cloud text ---
+  if (s.godCloudActive) {
+    ctx.save();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 22px monospace';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = '#00ccff';
+    ctx.shadowBlur = 15;
+    ctx.fillText('YOU ARE THE BEE!', W / 2, 80);
+    ctx.fillText('GET OUT OF MY BUSINESS!', W / 2, 110);
+    ctx.restore();
+  }
+
+  // --- Stun indicator ---
+  if (s.player.stunned) {
+    ctx.fillStyle = 'rgba(255,255,0,0.3)';
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('STUNNED!', W / 2, H / 2 - 40);
+    ctx.textAlign = 'left';
+  }
+
+  // End screen shake
+  if (s.shakeTimer > 0) {
+    ctx.restore();
+  }
+
+  // --- Draw HUD ---
+  drawHUD();
+}
+
+function drawHUD() {
+  const s = state;
+  // HUD background
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, W, HUD_HEIGHT);
+
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'left';
+
+  // Score
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Score: ' + s.score, 10, 26);
+
+  // Lives
+  ctx.fillStyle = '#ff4444';
+  for (let i = 0; i < s.lives; i++) {
+    ctx.fillRect(130 + i * 22, 14, 16, 16);
+  }
+
+  // Honey count
+  ctx.fillStyle = '#ffaa00';
+  ctx.fillText('Honey: ' + s.honey, 210, 26);
+
+  // Pollen bar
+  const barX = 340;
+  const barY = 14;
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX, barY, POLLEN_BAR_W, POLLEN_BAR_H);
+  const fillW = (s.pollen / POLLEN_TO_HONEY) * POLLEN_BAR_W;
+  ctx.fillStyle = '#ffdd00';
+  ctx.fillRect(barX, barY, fillW, POLLEN_BAR_H);
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Pollen ' + s.pollen + '/' + POLLEN_TO_HONEY, barX + POLLEN_BAR_W + 8, 26);
+
+  // Rage indicator
+  if (s.rageActive) {
+    ctx.fillStyle = '#ff2200';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('RAGE! ' + Math.ceil(s.rageTimer) + 's', 620, 26);
+  }
+}
+
+function drawTitleScreen() {
+  if (spriteReady('background')) {
+    ctx.drawImage(SPRITE.background, 0, 0, W, H);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  ctx.textAlign = 'center';
+
+  // Subtitle
+  ctx.fillStyle = '#9933ff';
+  ctx.font = '14px monospace';
+  ctx.fillText('~ A BLOCKY THOR ADVENTURE ~', W / 2, 60);
+
+  // Title
+  ctx.fillStyle = '#4488ff';
+  ctx.font = 'bold 40px monospace';
+  ctx.fillText("CYBER-THOR'S", W / 2, 100);
+  ctx.fillText('HONEY HEIST', W / 2, 148);
+
+  // Instructions
+  ctx.font = '13px monospace';
+  let y = 190;
+  const gap = 22;
+  ctx.fillStyle = '#888';
+  ctx.fillText('WASD / Arrow Keys to move', W / 2, y); y += gap;
+  ctx.fillStyle = '#ffdd00';
+  ctx.fillText('Collect POLLEN (yellow) \u2192 10 pollen = 1 honey = +100 pts', W / 2, y); y += gap;
+  ctx.fillStyle = '#ffaa00';
+  ctx.fillText('GOLD TOKENS = permanent +10% speed boost', W / 2, y); y += gap;
+  ctx.fillStyle = '#00ccff';
+  ctx.fillText('BLUE TOKENS = OPTIMUS RAGE MODE (invincible!)', W / 2, y); y += gap;
+  ctx.fillStyle = '#ff3333';
+  ctx.fillText('Queen Bee enemies (red) \u2014 fast & small', W / 2, y); y += gap;
+  ctx.fillStyle = '#9933ff';
+  ctx.fillText('Loki/Doom enemies (purple) \u2014 slow & tracks you', W / 2, y); y += gap;
+  ctx.fillStyle = '#fff';
+  ctx.fillText('3 lives \u2022 Lightning stuns you \u2022 Survive!', W / 2, y); y += gap + 8;
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#ffaa00';
+    ctx.font = '16px monospace';
+    ctx.fillText('High Score: ' + highScore, W / 2, y); y += gap + 4;
+  }
+
+  // Start prompt
+  ctx.fillStyle = '#ffcc00';
+  ctx.font = 'bold 20px monospace';
+  const isTouchDevice = 'ontouchstart' in window;
+  ctx.fillText(isTouchDevice ? 'Tap to start' : 'Press ENTER to start', W / 2, y); y += gap;
+
+  // Fullscreen hint
+  ctx.fillStyle = '#555';
+  ctx.font = '12px monospace';
+  ctx.fillText(isTouchDevice ? 'Double-tap for fullscreen' : 'Press F for fullscreen', W / 2, y);
+  ctx.textAlign = 'left';
+}
+
+function drawGameOver() {
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 48px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('GAME OVER', W / 2, H / 2 - 40);
+  ctx.fillStyle = '#fff';
+  ctx.font = '24px monospace';
+  ctx.fillText('Score: ' + state.score, W / 2, H / 2 + 10);
+  ctx.fillStyle = '#ffaa00';
+  ctx.font = '16px monospace';
+  ctx.fillText('Honey collected: ' + state.honey, W / 2, H / 2 + 40);
+  if (state.score >= highScore && state.score > 0) {
+    ctx.fillStyle = '#00ff88';
+    ctx.font = 'bold 18px monospace';
+    ctx.fillText('NEW HIGH SCORE!', W / 2, H / 2 + 70);
+  } else {
+    ctx.fillStyle = '#888';
+    ctx.font = '16px monospace';
+    ctx.fillText('High Score: ' + highScore, W / 2, H / 2 + 70);
+  }
+  ctx.fillStyle = '#ffcc00';
+  ctx.font = '20px monospace';
+  ctx.fillText(('ontouchstart' in window) ? 'Tap to restart' : 'Press ENTER to restart', W / 2, H / 2 + 110);
+  ctx.textAlign = 'left';
+}
+
+// === GAME LOOP ===
+function gameLoop(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, MAX_DT);
+  lastTime = timestamp;
+
+  // Title / Game Over input
+  if (state.titleScreen || state.gameOver) {
+    if (keys['Enter'] || keys['_tap']) {
+      keys['Enter'] = false;
+      keys['_tap'] = false;
+      state = resetState();
+      state.titleScreen = false;
+      if ('ontouchstart' in window) gameContainer.requestFullscreen().catch(()=>{});
+      else document.body.classList.add('maximized');
+    }
+  }
+
+  update(dt);
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(function(timestamp) {
+  lastTime = timestamp;
+  gameLoop(timestamp);
+});
+
+// === TOUCH CONTROLS (Virtual Joystick) ===
+if ('ontouchstart' in window) {
+  const joy = document.getElementById('joystick');
+  const knob = document.getElementById('joystick-knob');
+  joy.style.display = 'block';
+
+  const DEAD_ZONE = 0.2; // fraction of radius
+  let joyActive = false;
+  let joyId = null;
+
+  function updateJoystick(touchX, touchY) {
+    const rect = joy.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const maxR = rect.width / 2 - 10;
+    let dx = touchX - cx;
+    let dy = touchY - cy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > maxR) { dx = (dx / dist) * maxR; dy = (dy / dist) * maxR; }
+    knob.style.left = (rect.width / 2 - 28 + dx) + 'px';
+    knob.style.top = (rect.height / 2 - 28 + dy) + 'px';
+    const norm = dist / maxR;
+    keys['ArrowLeft'] = (dx < -maxR * DEAD_ZONE);
+    keys['ArrowRight'] = (dx > maxR * DEAD_ZONE);
+    keys['ArrowUp'] = (dy < -maxR * DEAD_ZONE);
+    keys['ArrowDown'] = (dy > maxR * DEAD_ZONE);
+  }
+
+  function resetJoystick() {
+    joyActive = false; joyId = null;
+    knob.style.left = '42px'; knob.style.top = '42px';
+    keys['ArrowLeft'] = false; keys['ArrowRight'] = false;
+    keys['ArrowUp'] = false; keys['ArrowDown'] = false;
+  }
+
+  joy.addEventListener('touchstart', e => {
+    e.preventDefault(); e.stopPropagation();
+    const t = e.changedTouches[0];
+    joyActive = true; joyId = t.identifier;
+    updateJoystick(t.clientX, t.clientY);
+  }, {passive: false});
+
+  joy.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      if (t.identifier === joyId) { updateJoystick(t.clientX, t.clientY); break; }
+    }
+  }, {passive: false});
+
+  joy.addEventListener('touchend', e => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === joyId) { resetJoystick(); break; }
+    }
+  }, {passive: false});
+
+  joy.addEventListener('touchcancel', () => { resetJoystick(); }, {passive: false});
+
+  // Tap canvas to start — also go fullscreen on first touch
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    keys['_tap'] = true;
+    if (!document.fullscreenElement) {
+      gameContainer.requestFullscreen().catch(()=>{});
+    }
+  }, {passive: false});
+}
+
+// Desktop: double-click to toggle maximized
+canvas.addEventListener('dblclick', () => {
+  document.body.classList.toggle('maximized');
+});
+</script>
+</body>
+</html>
