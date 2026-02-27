@@ -45,8 +45,8 @@ Open `index.html` in Google Chrome. No build or serve step needed.
 - **Named constants** for all magic numbers at the top of the script
 - **Primitives first** — colored rectangles and circles, no sprites unless added later
 
-## Repository Files
+## Repository Layout
 
-- `short_prd.md` — Full PRD with the exact AI prompt specification, image generation prompts (for Gemini), and sound effect sourcing notes (Freesound.org CC0, ZapSplat CC0)
-- `setup.md` — The 6 scope-controlling questions methodology and AI prompt template
-- `answers.md` — Transcript of the Q&A session with the kids that produced the game design
+- `assets/` — Game assets loaded by `index.html` (`sprites.js`, `sounds.js`, and source files in `sprites/`, `sounds/`)
+- `docs/` — Design documents (`short_prd.md`, `setup.md`, `answers.md`)
+- `tools/` — Scripts for generating assets and deploying (`generate_sounds.sh`, `generate_sprites.sh`, service scripts)

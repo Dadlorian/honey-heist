@@ -4,14 +4,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/.env"
+REPO_DIR="$SCRIPT_DIR/.."
+source "$REPO_DIR/.env"
 
 if [ -z "${GEMINI_API_KEY:-}" ]; then
   echo "ERROR: GEMINI_API_KEY not set in .env"
   exit 1
 fi
 
-SPRITES_DIR="$SCRIPT_DIR/sprites"
+SPRITES_DIR="$REPO_DIR/assets/sprites"
 mkdir -p "$SPRITES_DIR"
 
 MODEL="gemini-2.0-flash-exp-image-generation"
@@ -113,5 +114,5 @@ generate_image "blue_token" \
 generate_image "background" \
   "A seamless 2D background for a retro video game, 800x600 resolution. Cybernetic cloudscape: dark indigo sky with fluffy purple-blue clouds mixed with glowing neon blue circuitry lines and small metallic structures. Cyberpunk aesthetic, 16-bit pixel art style. Stars and distant lightning in the background. No text, no characters."
 
-echo "=== Done! Check sprites/ directory ==="
+echo "=== Done! Check assets/sprites/ directory ==="
 ls -la "$SPRITES_DIR"/*.png 2>/dev/null || echo "No PNG files generated."

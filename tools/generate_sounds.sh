@@ -6,7 +6,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOUNDS_DIR="$SCRIPT_DIR/sounds"
+REPO_DIR="$SCRIPT_DIR/.."
+SOUNDS_DIR="$REPO_DIR/assets/sounds"
+export SOUNDS_DIR
 mkdir -p "$SOUNDS_DIR"
 
 echo "=== Cyber-Thor's Honey Heist — Sound Generator ==="
@@ -19,9 +21,7 @@ import math
 import base64
 import os
 
-SOUNDS_DIR = os.path.join(os.path.dirname(os.path.abspath(".")), "sounds")
-# Use the script's sounds dir
-SOUNDS_DIR = os.environ.get("SOUNDS_DIR", "sounds")
+SOUNDS_DIR = os.environ.get("SOUNDS_DIR", "assets/sounds")
 
 SAMPLE_RATE = 22050
 
@@ -178,6 +178,6 @@ print("\nAll sounds generated!")
 PYEOF
 
 echo ""
-echo "=== Done! Check sounds/ directory ==="
+echo "=== Done! Check assets/sounds/ directory ==="
 ls -la "$SOUNDS_DIR"/*.wav 2>/dev/null || echo "No WAV files generated."
 ls -la "$SOUNDS_DIR"/*.b64 2>/dev/null || echo "No B64 files generated."
